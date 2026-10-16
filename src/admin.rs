@@ -47,38 +47,37 @@ pub fn load(db: &Connection) -> Vec<TenantCfg> {
 }
 
 pub fn routes(app: Arc<App>) -> Router {
-    Router::new()
-        .route("/admin/tenants", get(list).post(create))
-        .route("/admin/tenants/{name}", delete(revoke))
-        .with_state(app)
+    Router::new().route("/admin/tenants", get(list).post(create)).route("/admin/tenants/{name}", delete(revoke)).with_state(app)
 }
 
 fn err(status: u16, msg: &str) -> Response {
     (StatusCode::from_u16(status).unwrap(), Json(json!({"error": {"type": "admin_error", "message": msg}}))).into_response()
 }
 
-fn guard(app: &App, h: &HeaderMap) -> Result<(), Response> {
-    let Some(token) = &app.cfg.admin_token else { return Err(StatusCode::NOT_FOUND.into_response()) };
+/// Err((status, message)) is small on purpose: a whole `Response` as the error type is 128+ bytes.
+fn guard(app: &App, h: &HeaderMap) -> Result<(), (u16, &'static str)> {
+    let Some(token) = &app.cfg.admin_token else { return Err((404, "not found")) };
     let given = h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("");
     let (a, b) = (Sha256::digest(token.as_bytes()), Sha256::digest(given.as_bytes()));
     // Constant-time comparison of fixed-size digests.
     if a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0 {
         Ok(())
     } else {
-        Err(err(401, "invalid admin token"))
+        Err((401, "invalid admin token"))
     }
 }
 
 async fn create(State(app): State<Arc<App>>, h: HeaderMap, raw: Bytes) -> Response {
-    if let Err(r) = guard(&app, &h) {
-        return r;
+    if let Err((s, m)) = guard(&app, &h) {
+        return err(s, m);
     }
     let Ok(v) = serde_json::from_slice::<Value>(&raw) else { return err(400, "body must be JSON") };
     let name = v["name"].as_str().unwrap_or("").to_owned();
     if !(1..=32).contains(&name.len()) || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
         return err(400, "name must match [a-z0-9_]{1,32}");
     }
-    let models: Vec<String> = v["models"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+    let models: Vec<String> =
+        v["models"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default();
     let (key, hash) = new_key();
     let cfg = TenantCfg {
         name: name.clone(),
@@ -108,8 +107,8 @@ async fn create(State(app): State<Arc<App>>, h: HeaderMap, raw: Bytes) -> Respon
 }
 
 async fn list(State(app): State<Arc<App>>, h: HeaderMap) -> Response {
-    if let Err(r) = guard(&app, &h) {
-        return r;
+    if let Err((s, m)) = guard(&app, &h) {
+        return err(s, m);
     }
     let data: Vec<Value> = app
         .tenants
@@ -130,8 +129,8 @@ async fn list(State(app): State<Arc<App>>, h: HeaderMap) -> Response {
 }
 
 async fn revoke(State(app): State<Arc<App>>, h: HeaderMap, Path(name): Path<String>) -> Response {
-    if let Err(r) = guard(&app, &h) {
-        return r;
+    if let Err((s, m)) = guard(&app, &h) {
+        return err(s, m);
     }
     let mut tenants = app.tenants.write().unwrap();
     let Some((hash, t)) = tenants.iter().find(|(_, t)| t.name() == name).map(|(k, t)| (k.clone(), t.clone())) else {

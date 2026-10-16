@@ -203,7 +203,16 @@ mod tests {
 
     #[test]
     fn budget_trips_and_reports_retry() {
-        let cfg = TenantCfg { name: "t".into(), key_hash: String::new(), rpm: 60.0, tpm: 1e5, max_concurrent: 4, daily_usd: Some(1.0), monthly_usd: None, models: vec![] };
+        let cfg = TenantCfg {
+            name: "t".into(),
+            key_hash: String::new(),
+            rpm: 60.0,
+            tpm: 1e5,
+            max_concurrent: 4,
+            daily_usd: Some(1.0),
+            monthly_usd: None,
+            models: vec![],
+        };
         let t = Tenant::new(cfg, false);
         assert!(t.over_budget().is_none());
         t.add_spend(1.0);

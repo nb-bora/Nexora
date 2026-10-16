@@ -53,7 +53,20 @@ pub fn spawn(path: &str) -> SyncSender<Row> {
                 {
                     let mut st = t.prepare_cached("INSERT INTO ledger(id,tenant,alias,provider,model,prompt_tokens,completion_tokens,cost_usd,latency_ms,status,attempts,estimated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")?;
                     for r in &batch {
-                        st.execute(params![r.id, r.tenant, r.alias, r.provider, r.model, r.prompt_tokens, r.completion_tokens, r.cost_usd, r.latency_ms, r.status, r.attempts, r.estimated])?;
+                        st.execute(params![
+                            r.id,
+                            r.tenant,
+                            r.alias,
+                            r.provider,
+                            r.model,
+                            r.prompt_tokens,
+                            r.completion_tokens,
+                            r.cost_usd,
+                            r.latency_ms,
+                            r.status,
+                            r.attempts,
+                            r.estimated
+                        ])?;
                     }
                 }
                 t.commit()

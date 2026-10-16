@@ -1,7 +1,14 @@
 //! End-to-end tests: the real binary, a mock OpenAI-compatible upstream (axum), a real HTTP client.
 //! Each test starts its own gateway on free ports with its own SQLite file.
 
-use axum::{body::Bytes, extract::State, http::{header, HeaderMap, StatusCode}, response::IntoResponse, routing::post, Router};
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::post,
+    Router,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -36,10 +43,12 @@ async fn mock() -> Mock {
                        data: [DONE]\n\n";
             return ([(header::CONTENT_TYPE, "text/event-stream")], sse).into_response();
         }
-        axum::Json(json!({"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}})).into_response()
+        axum::Json(json!({"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}))
+            .into_response()
     }
     let seen: Seen = Default::default();
-    let app = Router::new().route("/broken/chat/completions", post(broken)).route("/good/chat/completions", post(good)).with_state(seen.clone());
+    let app =
+        Router::new().route("/broken/chat/completions", post(broken)).route("/good/chat/completions", post(good)).with_state(seen.clone());
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -156,7 +165,8 @@ async fn auth_and_model_visibility() {
     let gw = start(&m, &[("NEXORA_TENANT_T1_MODELS", "smart")]).await;
     assert_eq!(gw.chat("wrong", msg()).await.status(), 401);
     assert_eq!(gw.chat(KEY, json!({"model": "dead", "messages": []})).await.status(), 404, "not allowed looks like unknown");
-    let models: Value = gw.http.get(format!("http://127.0.0.1:{}/v1/models", gw.port)).bearer_auth(KEY).send().await.unwrap().json().await.unwrap();
+    let models: Value =
+        gw.http.get(format!("http://127.0.0.1:{}/v1/models", gw.port)).bearer_auth(KEY).send().await.unwrap().json().await.unwrap();
     assert_eq!(models["data"].as_array().unwrap().len(), 1);
 }
 
@@ -245,7 +255,9 @@ async fn budget_requires_priced_models() {
     let (port, admin) = (free_port(), free_port());
     let dir = std::env::temp_dir().join(format!("nexora-e2e-{port}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let out = command(&m, port, admin, &dir.join("l.db"), &[("NEXORA_TENANT_T1_DAILY_BUDGET_USD", "1"), ("NEXORA_PRICES", "good/m2=1:2")]).output().unwrap();
+    let out = command(&m, port, admin, &dir.join("l.db"), &[("NEXORA_TENANT_T1_DAILY_BUDGET_USD", "1"), ("NEXORA_PRICES", "good/m2=1:2")])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("has no price"));
 }
@@ -269,7 +281,12 @@ async fn admin_api_key_lifecycle() {
     let gw = start(&m, &[]).await;
     assert_eq!(gw.http.get(format!("http://127.0.0.1:{}/admin/tenants", gw.admin)).send().await.unwrap().status(), 401);
 
-    let r = gw.admin(reqwest::Method::POST, "/admin/tenants").json(&json!({"name": "acme", "rpm": 100, "daily_budget_usd": 5.0, "models": ["smart"]})).send().await.unwrap();
+    let r = gw
+        .admin(reqwest::Method::POST, "/admin/tenants")
+        .json(&json!({"name": "acme", "rpm": 100, "daily_budget_usd": 5.0, "models": ["smart"]}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 201);
     let key = r.json::<Value>().await.unwrap()["api_key"].as_str().unwrap().to_owned();
     assert_eq!(gw.chat(&key, msg()).await.status(), 200, "new key works immediately, no restart");
@@ -282,7 +299,11 @@ async fn admin_api_key_lifecycle() {
     let list = gw.admin(reqwest::Method::GET, "/admin/tenants").send().await.unwrap().text().await.unwrap();
     assert!(list.contains("acme") && !list.contains(&key) && !list.contains("key_hash"), "secrets never listed");
 
-    assert_eq!(gw.admin(reqwest::Method::DELETE, "/admin/tenants/t1").send().await.unwrap().status(), 409, "env tenants are not revocable via the API");
+    assert_eq!(
+        gw.admin(reqwest::Method::DELETE, "/admin/tenants/t1").send().await.unwrap().status(),
+        409,
+        "env tenants are not revocable via the API"
+    );
     assert_eq!(gw.admin(reqwest::Method::DELETE, "/admin/tenants/acme").send().await.unwrap().status(), 204);
     assert_eq!(gw.chat(&key, msg()).await.status(), 401, "revocation is immediate");
 }

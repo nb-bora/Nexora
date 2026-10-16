@@ -22,6 +22,17 @@ Every decision below has a falsifier. If the falsifier fires, we change the deci
 
 `tests/e2e.rs` runs the real binary against a mock upstream. The suite was mutation-checked by hand: removing budget booking, the concurrency check, the revocation, or the provider key each turns a specific test red. Re-do this whenever a guard is added. Always read response bodies in tests: an abandoned response is, to the gateway, a client cancellation (no usage, slot held until dropped).
 
+## CI (`.github/workflows/ci.yml`)
+
+Three jobs on every PR and on `main`: `fmt` + `clippy -D warnings` + all tests; `cargo audit` with warnings denied; docker build + smoke test. Dependabot proposes weekly updates for cargo, actions and the base image. Before it existed, a local audit found four advisories in `rustls 0.23.45` (fixed by `0.23.46`): the audit job is what keeps that from recurring.
+
+Honest limits of this setup:
+- The workflow was linted with `actionlint` and each job's commands were replayed locally in Docker, but it had **not run on GitHub** when it was written.
+- Actions are pinned to major tags (`@v4`), not commit SHAs: a compromised tag would run in CI. Dependabot keeps them current; SHA pinning is the stricter option.
+- The Rust toolchain floats on `stable`: a new Rust release can add a clippy lint and turn CI red without any change here. That is a deliberate trade for staying current; pin a version in `rust-toolchain.toml` if it becomes a nuisance.
+- `cargo audit` fails on *any* new advisory in the lockfile, even one unrelated to the change being merged. Intentional: fix or consciously ignore it with a reason.
+- No branch protection is configured by this repository; a PR can be merged with a red check unless the GitHub repo is set to require it.
+
 ## Measured (not claimed)
 
 Reproduce with `docker compose -f bench/compose.yml up --build --abort-on-container-exit --exit-code-from bench` (see `bench/README.md`). Release build, Node mock upstream, client / mock / gateway on one Docker network, 5 000 requests per point, non-streaming, one Windows laptop under Docker Desktop (run-to-run noise is of the order of the p99 differences below).
