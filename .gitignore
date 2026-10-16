@@ -1,0 +1,6 @@
+/target
+/graphify-out
+*.db
+*.db-wal
+*.db-shm
+.env

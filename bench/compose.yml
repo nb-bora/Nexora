@@ -1,0 +1,22 @@
+# docker compose -f bench/compose.yml up --build --abort-on-container-exit --exit-code-from bench
+# Everything runs on one Docker network so no host-networking hop favours either side.
+services:
+  mock:
+    image: node:22-alpine
+    command: node /b/mock.js
+    volumes: ["./:/b:ro"]
+  nexora:
+    build: ..
+    environment:
+      NEXORA_PROVIDER_MOCK_URL: http://mock:9102/v1
+      NEXORA_ALIAS_FAST: mock/m
+      NEXORA_TENANT_BENCH_KEY_HASH: 842fd9a73a075b45239041702b0e617faad6a89faf6328ac58c6d5a47a816051   # sha256("nx_live_bench")
+      NEXORA_TENANT_BENCH_RPM: "100000000"
+      NEXORA_TENANT_BENCH_TPM: "100000000000"
+      NEXORA_TENANT_BENCH_MAX_CONCURRENT: "100000"
+    depends_on: [mock]
+  bench:
+    image: node:22-alpine
+    command: sh -c "sleep 2 && node /b/bench.js"
+    volumes: ["./:/b:ro"]
+    depends_on: [nexora]
