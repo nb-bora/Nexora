@@ -119,7 +119,8 @@ impl Config {
             .map(|n| {
                 let u = n.to_uppercase();
                 let p = Provider {
-                    base_url: var(&format!("NEXORA_PROVIDER_{u}_URL")).unwrap(),
+                    base_url: var(&format!("NEXORA_PROVIDER_{u}_URL"))
+                        .unwrap_or_else(|| panic!("NEXORA_PROVIDER_{u}_URL is set but empty")),
                     api_key: var(&format!("NEXORA_PROVIDER_{u}_KEY")),
                     timeout_ms: num(&format!("NEXORA_PROVIDER_{u}_TIMEOUT_MS"), 60_000),
                 };
@@ -139,7 +140,9 @@ impl Config {
             .map(|n| {
                 let u = n.to_uppercase();
                 TenantCfg {
-                    key_hash: var(&format!("NEXORA_TENANT_{u}_KEY_HASH")).unwrap().to_lowercase(),
+                    key_hash: var(&format!("NEXORA_TENANT_{u}_KEY_HASH"))
+                        .unwrap_or_else(|| panic!("NEXORA_TENANT_{u}_KEY_HASH is set but empty"))
+                        .to_lowercase(),
                     rpm: num(&format!("NEXORA_TENANT_{u}_RPM"), 60.0),
                     tpm: num(&format!("NEXORA_TENANT_{u}_TPM"), 100_000.0),
                     max_concurrent: num(&format!("NEXORA_TENANT_{u}_MAX_CONCURRENT"), 64),
@@ -186,8 +189,14 @@ impl Config {
         if t.key_hash.len() != 64 || !t.key_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(format!("tenant {n}: key_hash must be sha256 hex"));
         }
-        if !(t.max_concurrent > 0 && t.rpm > 0.0 && t.tpm > 0.0) {
-            return Err(format!("tenant {n}: rpm, tpm and max_concurrent must be > 0"));
+        if !(t.max_concurrent > 0 && t.rpm.is_finite() && t.rpm > 0.0 && t.tpm.is_finite() && t.tpm > 0.0) {
+            return Err(format!("tenant {n}: rpm, tpm and max_concurrent must be finite and > 0"));
+        }
+        // NaN would make every `spent >= budget` comparison false: the cap would silently never apply.
+        for (label, b) in [("daily", t.daily_usd), ("monthly", t.monthly_usd)] {
+            if b.is_some_and(|v| !(v.is_finite() && v > 0.0)) {
+                return Err(format!("tenant {n}: {label} budget must be a finite number > 0"));
+            }
         }
         if let Some(m) = t.models.iter().find(|m| !self.aliases.contains_key(*m)) {
             return Err(format!("tenant {n}: unknown alias {m}"));
@@ -210,6 +219,47 @@ mod tests {
         let t = parse_targets("smart", "OpenAI/gpt-x, local/meta/llama-3");
         assert_eq!((t[0].provider.as_str(), t[0].model.as_str()), ("openai", "gpt-x"));
         assert_eq!((t[1].provider.as_str(), t[1].model.as_str()), ("local", "meta/llama-3"));
+    }
+
+    fn tenant() -> TenantCfg {
+        TenantCfg {
+            name: "t".into(),
+            key_hash: "a".repeat(64),
+            rpm: 60.0,
+            tpm: 1e5,
+            max_concurrent: 4,
+            daily_usd: None,
+            monthly_usd: None,
+            models: vec![],
+        }
+    }
+
+    fn cfg() -> Config {
+        Config {
+            listen: String::new(),
+            admin_listen: String::new(),
+            admin_token: None,
+            max_body_bytes: 1,
+            ledger_path: String::new(),
+            providers: HashMap::new(),
+            aliases: HashMap::new(),
+            tenants: vec![],
+            prices: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn rejects_values_that_would_silently_disable_a_limit() {
+        let c = cfg();
+        assert!(c.check_tenant(&tenant()).is_ok());
+        for bad in [f64::NAN, -1.0, 0.0, f64::INFINITY] {
+            let mut t = tenant();
+            t.daily_usd = Some(bad);
+            assert!(c.check_tenant(&t).is_err(), "daily budget {bad} must be rejected");
+            let mut t = tenant();
+            t.rpm = bad;
+            assert!(c.check_tenant(&t).is_err(), "rpm {bad} must be rejected");
+        }
     }
 
     #[test]

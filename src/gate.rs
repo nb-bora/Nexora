@@ -4,7 +4,7 @@
 //! Output size is unknown up front, so we reserve (input + max_tokens) and refund the
 //! difference once real usage is known. Without this, TPM limits are bypassable by bursts.
 
-use crate::config::TenantCfg;
+use crate::{config::TenantCfg, sync::MutexExt};
 use std::{
     sync::{atomic::AtomicU32, Mutex},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -39,11 +39,13 @@ impl Limiter {
 
     /// Ok(reserved tokens) or Err(seconds to wait).
     pub fn admit(&self, est: f64) -> Result<f64, f64> {
-        let mut g = self.0.lock().unwrap();
+        let mut g = self.0.guard();
         let (r, t) = &mut *g;
         r.refill();
         t.refill();
-        let est = est.min(t.cap); // an oversized request must not be blocked forever
+        // The estimate derives from client input (`max_tokens`): a negative or NaN value must neither
+        // inflate the bucket nor drain it on settlement. An oversized one must not block forever.
+        let est = if est.is_nan() { 0.0 } else { est.clamp(0.0, t.cap) };
         let wait = r.wait(1.0).max(t.wait(est));
         if wait > 0.0 {
             return Err(wait);
@@ -54,14 +56,15 @@ impl Limiter {
     }
 
     pub fn settle(&self, reserved: f64, actual: f64) {
-        let mut g = self.0.lock().unwrap();
+        let mut g = self.0.guard();
         let t = &mut g.1;
         t.level = (t.level + reserved - actual).min(t.cap);
     }
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    // A clock set before 1970 yields day 0 instead of a panic on every request.
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// Days since 1970-01-01 (UTC).
@@ -142,20 +145,20 @@ impl Tenant {
 
     /// Restore spend from the ledger after a restart.
     pub fn seed(&self, day_usd: f64, month_usd: f64) {
-        let mut s = self.spend.lock().unwrap();
+        let mut s = self.spend.guard();
         s.day_usd = day_usd;
         s.month_usd = month_usd;
     }
 
     pub fn add_spend(&self, usd: f64) {
-        let mut s = self.spend.lock().unwrap();
+        let mut s = self.spend.guard();
         Self::roll(&mut s);
         s.day_usd += usd;
         s.month_usd += usd;
     }
 
     pub fn spent(&self) -> (f64, f64) {
-        let mut s = self.spend.lock().unwrap();
+        let mut s = self.spend.guard();
         Self::roll(&mut s);
         (s.day_usd, s.month_usd)
     }
@@ -192,6 +195,19 @@ mod tests {
         l.settle(r, 100.0); // real usage was small: refund
         assert!(l.admit(600.0).is_ok());
         assert!(l.admit(1.0).is_err(), "rpm exhausted");
+    }
+
+    #[test]
+    fn hostile_estimates_cannot_inflate_or_drain_the_bucket() {
+        // `max_tokens` comes from the client: negative, NaN or infinite values must not corrupt the bucket.
+        let l = Limiter::new(100.0, 1000.0);
+        for est in [-1e9, f64::NAN, f64::NEG_INFINITY] {
+            let r = l.admit(est).expect("admitted");
+            assert!(r.is_finite() && r >= 0.0, "reservation must be sane for {est}, got {r}");
+            l.settle(r, 0.0);
+        }
+        assert!(l.admit(1000.0).is_ok(), "the bucket must not have been drained");
+        assert!(l.admit(1.0).is_err(), "and must not have been inflated beyond its capacity");
     }
 
     #[test]

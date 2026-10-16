@@ -2,6 +2,7 @@ mod admin;
 mod config;
 mod gate;
 mod ledger;
+mod sync;
 mod upstream;
 
 use axum::{
@@ -22,6 +23,7 @@ use std::{
     sync::{atomic::Ordering::Relaxed, mpsc::SyncSender, Arc, Mutex, RwLock},
     time::Instant,
 };
+use sync::RwLockExt;
 
 pub struct App {
     cfg: config::Config,
@@ -135,7 +137,10 @@ fn authenticate(app: &App, h: &HeaderMap) -> Result<Arc<Tenant>, E> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         // Keys are 256-bit random, so a hash-map lookup on their SHA-256 leaks nothing useful.
-        .and_then(|k| app.tenants.read().unwrap().get(&hex::encode(Sha256::digest(k.as_bytes()))).cloned())
+        .and_then(|k| {
+            let hash = hex::encode(Sha256::digest(k.as_bytes()));
+            app.tenants.rd().get(&hash).cloned()
+        })
         .ok_or(E(StatusCode::UNAUTHORIZED, "unauthorized", "invalid API key".into(), None))
 }
 
@@ -223,9 +228,13 @@ async fn run(app: &Arc<App>, h: &HeaderMap, raw: Bytes, path: &'static str, id: 
     if let Some(ct) = ct {
         r.headers_mut().insert(header::CONTENT_TYPE, ct);
     }
-    let hv = |s: &str| s.parse().unwrap();
-    r.headers_mut().insert("x-nexora-provider", hv(&provider));
-    r.headers_mut().insert("x-nexora-model", hv(&model));
+    // Provider and model names come from configuration and may not be valid header values:
+    // skip the header rather than panic on every request that reaches that target.
+    for (name, value) in [("x-nexora-provider", &provider), ("x-nexora-model", &model)] {
+        if let Ok(v) = value.parse() {
+            r.headers_mut().insert(name, v);
+        }
+    }
     r.headers_mut().insert("x-nexora-attempts", attempts.into());
     Ok(r)
 }
@@ -233,7 +242,9 @@ async fn run(app: &Arc<App>, h: &HeaderMap, raw: Bytes, path: &'static str, id: 
 async fn proxy(app: Arc<App>, h: HeaderMap, raw: Bytes, path: &'static str) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
     let mut r = run(&app, &h, raw, path, &id).await.unwrap_or_else(IntoResponse::into_response);
-    r.headers_mut().insert("x-request-id", id.parse().unwrap());
+    if let Ok(v) = id.parse() {
+        r.headers_mut().insert("x-request-id", v);
+    }
     r
 }
 

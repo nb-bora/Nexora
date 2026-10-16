@@ -2,7 +2,12 @@
 //! Disabled (404) unless NEXORA_ADMIN_TOKEN is set. Keys are shown once and stored hashed.
 //! Revocation is immediate: the tenant leaves the in-memory map before the response returns.
 
-use crate::{config::TenantCfg, gate::Tenant, App};
+use crate::{
+    config::TenantCfg,
+    gate::Tenant,
+    sync::{MutexExt, RwLockExt},
+    App,
+};
 use axum::{
     body::Bytes,
     extract::{Path, State},
@@ -51,7 +56,11 @@ pub fn routes(app: Arc<App>) -> Router {
 }
 
 fn err(status: u16, msg: &str) -> Response {
-    (StatusCode::from_u16(status).unwrap(), Json(json!({"error": {"type": "admin_error", "message": msg}}))).into_response()
+    (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(json!({"error": {"type": "admin_error", "message": msg}})),
+    )
+        .into_response()
 }
 
 /// Err((status, message)) is small on purpose: a whole `Response` as the error type is 128+ bytes.
@@ -84,7 +93,8 @@ async fn create(State(app): State<Arc<App>>, h: HeaderMap, raw: Bytes) -> Respon
         key_hash: hash.clone(),
         rpm: v["rpm"].as_f64().unwrap_or(60.0),
         tpm: v["tpm"].as_f64().unwrap_or(100_000.0),
-        max_concurrent: v["max_concurrent"].as_u64().unwrap_or(64) as u32,
+        // try_from, not `as`: 2^32 + 5 must not silently become 5.
+        max_concurrent: v["max_concurrent"].as_u64().map_or(64, |n| u32::try_from(n).unwrap_or(u32::MAX)),
         daily_usd: v["daily_budget_usd"].as_f64(),
         monthly_usd: v["monthly_budget_usd"].as_f64(),
         models,
@@ -92,17 +102,17 @@ async fn create(State(app): State<Arc<App>>, h: HeaderMap, raw: Bytes) -> Respon
     if let Err(e) = app.cfg.check_tenant(&cfg) {
         return err(400, &e);
     }
-    if app.tenants.read().unwrap().values().any(|t| t.name() == name) {
+    if app.tenants.rd().values().any(|t| t.name() == name) {
         return err(409, "tenant already exists");
     }
-    let inserted = app.db.lock().unwrap().execute(
+    let inserted = app.db.guard().execute(
         "INSERT INTO tenants VALUES(?,?,?,?,?,?,?,?)",
         params![cfg.name, cfg.key_hash, cfg.rpm, cfg.tpm, cfg.max_concurrent, cfg.daily_usd, cfg.monthly_usd, cfg.models.join(",")],
     );
     if let Err(e) = inserted {
         return err(500, &e.to_string());
     }
-    app.tenants.write().unwrap().insert(hash, Arc::new(Tenant::new(cfg, true)));
+    app.tenants.wr().insert(hash, Arc::new(Tenant::new(cfg, true)));
     (StatusCode::CREATED, Json(json!({"name": name, "api_key": key}))).into_response()
 }
 
@@ -112,8 +122,7 @@ async fn list(State(app): State<Arc<App>>, h: HeaderMap) -> Response {
     }
     let data: Vec<Value> = app
         .tenants
-        .read()
-        .unwrap()
+        .rd()
         .values()
         .map(|t| {
             let (day, month) = t.spent();
@@ -132,14 +141,14 @@ async fn revoke(State(app): State<Arc<App>>, h: HeaderMap, Path(name): Path<Stri
     if let Err((s, m)) = guard(&app, &h) {
         return err(s, m);
     }
-    let mut tenants = app.tenants.write().unwrap();
+    let mut tenants = app.tenants.wr();
     let Some((hash, t)) = tenants.iter().find(|(_, t)| t.name() == name).map(|(k, t)| (k.clone(), t.clone())) else {
         return err(404, "no such tenant");
     };
     if !t.dynamic {
         return err(409, "tenant is defined in the environment: remove it there and restart");
     }
-    if let Err(e) = app.db.lock().unwrap().execute("DELETE FROM tenants WHERE name=?", params![name]) {
+    if let Err(e) = app.db.guard().execute("DELETE FROM tenants WHERE name=?", params![name]) {
         return err(500, &e.to_string());
     }
     tenants.remove(&hash); // in-flight streams keep their Arc and finish; every new request gets 401

@@ -196,6 +196,33 @@ async fn fallback_streaming_and_exact_accounting() {
 }
 
 #[tokio::test]
+async fn hostile_max_tokens_cannot_wreck_the_limiter() {
+    let m = mock().await;
+    let gw = start(&m, &[("NEXORA_TENANT_T1_TPM", "5000")]).await;
+
+    // The damage needs overlap: while the hostile request is in flight, another admission refills (and
+    // so discards) the bucket's inflation; the hostile request's settlement then subtracts ~1e9 tokens.
+    let hostile = json!({"model": "slow", "max_tokens": -1_000_000_000, "messages": []});
+    let overlapping = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        gw.call(KEY, msg()).await
+    };
+    let (a, b) = tokio::join!(gw.call(KEY, hostile), overlapping);
+    assert_eq!((a.0, b.0), (200, 200));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let follow_up = gw.call(KEY, msg()).await;
+    assert_eq!(follow_up.0, 200, "the tenant must not be locked out by a hostile max_tokens: {}", follow_up.1);
+
+    // An absurdly large (or malformed) max_tokens reserves the whole bucket by design, so it must be
+    // admitted once the bucket is full again; it must not be refused outright or break later requests.
+    for max_tokens in [json!(1e300), json!("lots"), json!(null)] {
+        tokio::time::sleep(Duration::from_millis(250)).await; // let the previous settlement and refill land
+        let (status, _) = gw.call(KEY, json!({"model": "smart", "max_tokens": max_tokens, "messages": []})).await;
+        assert_eq!(status, 200, "max_tokens={max_tokens} must not be refused or corrupt the bucket");
+    }
+}
+
+#[tokio::test]
 async fn all_upstreams_down_is_503_with_retry_after() {
     let m = mock().await;
     let gw = start(&m, &[]).await;
@@ -295,6 +322,20 @@ async fn admin_api_key_lifecycle() {
     assert_eq!(dup.status(), 409);
     let bad = gw.admin(reqwest::Method::POST, "/admin/tenants").json(&json!({"name": "x", "models": ["nope"]})).send().await.unwrap();
     assert_eq!(bad.status(), 400);
+    // A negative budget would block the tenant forever; a huge max_concurrent must not wrap around.
+    let neg = gw.admin(reqwest::Method::POST, "/admin/tenants").json(&json!({"name": "neg", "daily_budget_usd": -1})).send().await.unwrap();
+    assert_eq!(neg.status(), 400);
+    let wrap = gw
+        .admin(reqwest::Method::POST, "/admin/tenants")
+        .json(&json!({"name": "wrap", "max_concurrent": 4294967301u64}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrap.status(), 201);
+    let list = gw.admin(reqwest::Method::GET, "/admin/tenants").send().await.unwrap().json::<Value>().await.unwrap();
+    let wrapped = list["data"].as_array().unwrap().iter().find(|t| t["name"] == "wrap").unwrap();
+    assert_eq!(wrapped["max_concurrent"], u32::MAX, "2^32+5 clamps instead of wrapping to 5");
+    assert_eq!(gw.admin(reqwest::Method::DELETE, "/admin/tenants/wrap").send().await.unwrap().status(), 204);
 
     let list = gw.admin(reqwest::Method::GET, "/admin/tenants").send().await.unwrap().text().await.unwrap();
     assert!(list.contains("acme") && !list.contains(&key) && !list.contains("key_hash"), "secrets never listed");

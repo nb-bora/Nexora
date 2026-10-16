@@ -18,9 +18,15 @@ Every decision below has a falsifier. If the falsifier fires, we change the deci
 | 12 | Tenants and keys manageable through an admin API on the control plane only, disabled unless a token is set; revocation = removal from the in-memory map | Keys must be rotatable without a restart; the admin surface must not exist by default | The admin API is ever exposed beyond loopback/private network without mTLS or an allow-list: that is a deployment error, document and refuse |
 | 13 | Concurrency slot is owned by the response stream and freed when it is dropped | Streams are long-lived; counting requests instead of open streams would not protect connections | — |
 
+| 14 | Locks ignore poisoning (`sync.rs`: `guard()`, `rd()`, `wr()`); inputs that feed limits are validated or clamped (finite and > 0) | One panic under a lock must not turn into an outage for every later request of that tenant; critical sections only touch numbers and maps, so the data stays usable | A critical section starts to hold multi-step invariants (then poisoning is a useful alarm: use a real recovery path for that structure) |
+
+Request-path panic sites: no `lock/read/write().unwrap()` and no header `parse().unwrap()` remain. Startup keeps its deliberate panics (fail-fast config); the rest of the `unwrap`s are in tests.
+
+Hostile input found while doing this: a client could send a negative `max_tokens`. With a concurrent request in flight, the bucket's inflation was discarded by the next refill and the hostile request's settlement then subtracted ~1e9 tokens, locking the tenant out. The estimate is now clamped to `[0, capacity]` (NaN counts as 0). Related hardening: NaN/negative/zero budgets and infinite rpm/tpm are rejected (NaN would silently disable a cap); `max_concurrent` above `u32::MAX` clamps instead of wrapping.
+
 ## Test discipline
 
-`tests/e2e.rs` runs the real binary against a mock upstream. The suite was mutation-checked by hand: removing budget booking, the concurrency check, the revocation, or the provider key each turns a specific test red. Re-do this whenever a guard is added. Always read response bodies in tests: an abandoned response is, to the gateway, a client cancellation (no usage, slot held until dropped).
+`tests/e2e.rs` runs the real binary against a mock upstream. The suite was mutation-checked by hand: removing budget booking, the concurrency check, the revocation, or the provider key each turns a specific test red. Re-do this whenever a guard is added. Mutation-check lessons: run mutants with their **own** `CARGO_TARGET_DIR` (copies of the crate share the output name `nexora`, so a shared target dir can make the real test run a sabotaged binary), and make sure the test exercises the failure *as an attacker would* (the negative-`max_tokens` defect only appears with overlapping requests: a sequential test passed against the broken code). Always read response bodies in tests: an abandoned response is, to the gateway, a client cancellation (no usage, slot held until dropped).
 
 ## CI (`.github/workflows/ci.yml`)
 
