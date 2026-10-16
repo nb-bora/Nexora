@@ -170,7 +170,10 @@ impl Config {
             tenants,
         };
         // Tenants may also come from the admin API, so "no tenant" is only an error if the API is off.
-        assert!(!cfg.tenants.is_empty() || cfg.admin_token.is_some(), "no tenant configured (NEXORA_TENANT_<NAME>_KEY_HASH) and admin API disabled (NEXORA_ADMIN_TOKEN)");
+        assert!(
+            !cfg.tenants.is_empty() || cfg.admin_token.is_some(),
+            "no tenant configured (NEXORA_TENANT_<NAME>_KEY_HASH) and admin API disabled (NEXORA_ADMIN_TOKEN)"
+        );
         for t in &cfg.tenants {
             cfg.check_tenant(t).unwrap_or_else(|e| panic!("{e}"));
         }

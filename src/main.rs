@@ -85,7 +85,13 @@ impl Drop for Meter {
         let u = self.usage();
         let (pt, ct) = u.unwrap_or((0, 0));
         // Unknown usage on a successful call: keep the reservation (conservative). On failure: refund.
-        let actual = if u.is_some() { (pt + ct) as f64 } else if self.status < 300 { self.reserved } else { 0.0 };
+        let actual = if u.is_some() {
+            (pt + ct) as f64
+        } else if self.status < 300 {
+            self.reserved
+        } else {
+            0.0
+        };
         self.tenant.limiter.settle(self.reserved, actual);
         let cost = self
             .app
@@ -150,10 +156,12 @@ async fn run(app: &Arc<App>, h: &HeaderMap, raw: Bytes, path: &'static str, id: 
     if let Some(wait) = tenant.over_budget() {
         return Err(E(StatusCode::TOO_MANY_REQUESTS, "budget_exceeded", "spending budget exhausted".into(), Some(wait)));
     }
-    let out = if path == "/embeddings" { 0.0 } else { body["max_completion_tokens"].as_f64().or(body["max_tokens"].as_f64()).unwrap_or(1024.0) };
-    let reserved = tenant.limiter.admit(raw.len() as f64 / 4.0 + out).map_err(|w| {
-        E(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "rate limit exceeded".into(), Some(w.ceil().max(1.0) as u64))
-    })?;
+    let out =
+        if path == "/embeddings" { 0.0 } else { body["max_completion_tokens"].as_f64().or(body["max_tokens"].as_f64()).unwrap_or(1024.0) };
+    let reserved = tenant
+        .limiter
+        .admit(raw.len() as f64 / 4.0 + out)
+        .map_err(|w| E(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "rate limit exceeded".into(), Some(w.ceil().max(1.0) as u64)))?;
     if tenant.inflight.fetch_add(1, Relaxed) >= tenant.cfg.max_concurrent {
         tenant.inflight.fetch_sub(1, Relaxed);
         tenant.limiter.settle(reserved, 0.0);
@@ -162,14 +170,28 @@ async fn run(app: &Arc<App>, h: &HeaderMap, raw: Bytes, path: &'static str, id: 
 
     // From here the Meter owns the concurrency slot and the token reservation.
     let mut meter = Meter {
-        app: app.clone(), tenant: tenant.clone(), id: id.to_owned(), alias: alias.clone(), provider: String::new(),
-        model: String::new(), reserved, t0, status: 503, attempts: 0, tail: Vec::new(),
+        app: app.clone(),
+        tenant: tenant.clone(),
+        id: id.to_owned(),
+        alias: alias.clone(),
+        provider: String::new(),
+        model: String::new(),
+        reserved,
+        t0,
+        status: 503,
+        attempts: 0,
+        tail: Vec::new(),
     };
     let (resp, i, attempts) = match app.up.forward(path, targets, &mut body).await {
         Ok(x) => x,
         Err(attempts) => {
             meter.attempts = attempts;
-            return Err(E(StatusCode::SERVICE_UNAVAILABLE, "upstream_unavailable", "all upstreams failed or are unavailable".into(), Some(5)));
+            return Err(E(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "upstream_unavailable",
+                "all upstreams failed or are unavailable".into(),
+                Some(5),
+            ));
         }
     };
     meter.provider = targets[i].provider.clone();
