@@ -16,7 +16,7 @@ hex = "0.4"
 rand = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.16", default-features = false }
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 futures-util = "0.3"
